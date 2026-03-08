@@ -1,9 +1,9 @@
-from app.model import ScamDetectionModel
+from app.ensemble import EnsemblePredictor
 from app.preprocessing import PreprocessedInput, preprocess_job_post
 from app.schemas import JobPostInput, PredictResponse
 
 
-def predict_single(job_post: JobPostInput, model: ScamDetectionModel) -> PredictResponse:
+def predict_single(job_post: JobPostInput, ensemble: EnsemblePredictor) -> PredictResponse:
     preprocessed = preprocess_job_post(
         job_title=job_post.job_title,
         job_desc=job_post.job_desc,
@@ -12,7 +12,7 @@ def predict_single(job_post: JobPostInput, model: ScamDetectionModel) -> Predict
         salary_range=job_post.salary_range,
         employment_type=job_post.employment_type,
     )
-    result = model.predict(preprocessed.combined_text)
+    result = ensemble.predict([preprocessed.combined_text])[0]
     return PredictResponse(
         prediction=result["prediction"],
         confidence=result["confidence"],
@@ -22,7 +22,7 @@ def predict_single(job_post: JobPostInput, model: ScamDetectionModel) -> Predict
 
 
 def predict_batch(
-    job_posts: list[JobPostInput], model: ScamDetectionModel
+    job_posts: list[JobPostInput], ensemble: EnsemblePredictor
 ) -> list[PredictResponse]:
     preprocessed_list: list[PreprocessedInput] = []
     for post in job_posts:
@@ -38,7 +38,7 @@ def predict_batch(
         )
 
     texts = [p.combined_text for p in preprocessed_list]
-    results = model.predict_batch(texts)
+    results = ensemble.predict(texts)
 
     return [
         PredictResponse(

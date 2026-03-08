@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 
+from app.bilstm import load_bilstm
 from app.config import settings
-from app.model import ScamDetectionModel, load_model
+from app.ensemble import DistilBertPredictor, EnsemblePredictor
+from app.model import load_model
 from app.schemas import (
     BatchPredictRequest,
     BatchPredictResponse,
@@ -13,6 +15,7 @@ from app.schemas import (
     PredictResponse,
 )
 from app.services.prediction import predict_batch, predict_single
+from app.traditional_ml import load_phase6_merged
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,11 +25,35 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Loading model on startup...")
     try:
-        app.state.model = load_model()
+        distilbert_model = load_model()
         logger.info("Model loaded successfully")
     except Exception:
         logger.exception("Failed to load model")
-        app.state.model = None
+        distilbert_model = None
+
+    phase6_model = None
+    if settings.phase6_merged_path:
+        phase6_model = load_phase6_merged(settings.phase6_merged_path)
+
+    bilstm_model = None
+    if settings.bilstm_artifact_path:
+        bilstm_model = load_bilstm(settings.bilstm_artifact_path)
+
+    if distilbert_model is not None:
+        predictors = [DistilBertPredictor(distilbert_model)]
+        if phase6_model is not None:
+            predictors.append(phase6_model)
+        if bilstm_model is not None:
+            predictors.append(bilstm_model)
+        app.state.ensemble = EnsemblePredictor(predictors)
+        logger.info(
+            "Ensemble ready: %s (hybrid=%s)",
+            app.state.ensemble.predictor_names,
+            app.state.ensemble.is_hybrid,
+        )
+    else:
+        app.state.ensemble = None
+
     yield
 
 
@@ -38,11 +65,11 @@ app = FastAPI(
 )
 
 
-def _get_model(request: Request) -> ScamDetectionModel:
-    model = request.app.state.model
-    if model is None:
+def _get_ensemble(request: Request) -> EnsemblePredictor:
+    ensemble = request.app.state.ensemble
+    if ensemble is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    return model
+    return ensemble
 
 
 @app.get("/")
@@ -52,24 +79,26 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse)
 async def health(request: Request):
-    model = request.app.state.model
-    if model is None:
+    ensemble = request.app.state.ensemble
+    if ensemble is None:
         return HealthResponse(status="degraded", model_loaded=False)
     return HealthResponse(
         status="ok",
         model_loaded=True,
         model_name=settings.model_name,
+        hybrid_enabled=ensemble.is_hybrid,
+        models_loaded=ensemble.predictor_names,
     )
 
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(job_post: JobPostInput, request: Request):
-    model = _get_model(request)
-    return predict_single(job_post, model)
+    ensemble = _get_ensemble(request)
+    return predict_single(job_post, ensemble)
 
 
 @app.post("/batch-predict", response_model=BatchPredictResponse)
 async def batch_predict(body: BatchPredictRequest, request: Request):
-    model = _get_model(request)
-    results = predict_batch(body.job_posts, model)
+    ensemble = _get_ensemble(request)
+    results = predict_batch(body.job_posts, ensemble)
     return BatchPredictResponse(results=results, count=len(results))

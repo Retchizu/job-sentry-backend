@@ -57,8 +57,14 @@ def load_model() -> ScamDetectionModel:
     artifact_path = Path(settings.model_artifact_path)
     model_name = settings.model_name
 
-    logger.info("Loading tokenizer from '%s'", model_name)
-    tokenizer = DistilBertTokenizerFast.from_pretrained(model_name)
+    # Use tokenizer from artifact dir if present (e.g. phase32/phase42), else base model
+    tokenizer_path = artifact_path / "tokenizer_config.json"
+    if tokenizer_path.exists():
+        logger.info("Loading tokenizer from '%s'", artifact_path)
+        tokenizer = DistilBertTokenizerFast.from_pretrained(str(artifact_path))
+    else:
+        logger.info("Loading tokenizer from '%s'", model_name)
+        tokenizer = DistilBertTokenizerFast.from_pretrained(model_name)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Using device: %s", device)
@@ -66,7 +72,13 @@ def load_model() -> ScamDetectionModel:
     safetensors_file = artifact_path / "model.safetensors"
     if safetensors_file.exists():
         logger.info("Loading fine-tuned model from '%s'", artifact_path)
-        config = DistilBertConfig.from_pretrained(model_name, num_labels=2)
+        config_path = artifact_path / "config.json"
+        if config_path.exists():
+            config = DistilBertConfig.from_pretrained(str(artifact_path))
+            if getattr(config, "num_labels", None) is None:
+                config.num_labels = 2
+        else:
+            config = DistilBertConfig.from_pretrained(model_name, num_labels=2)
         model = DistilBertForSequenceClassification(config)
         from safetensors.torch import load_file
 

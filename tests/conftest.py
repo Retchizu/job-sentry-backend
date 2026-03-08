@@ -7,6 +7,7 @@ from transformers import (
     DistilBertTokenizerFast,
 )
 
+from app.ensemble import DistilBertPredictor, EnsemblePredictor
 from app.main import app
 from app.model import ScamDetectionModel
 
@@ -29,17 +30,23 @@ def dummy_model():
     return ScamDetectionModel(model=model, tokenizer=tokenizer, device=device)
 
 
+@pytest.fixture(scope="session")
+def dummy_ensemble(dummy_model):
+    """Single-predictor ensemble wrapping the dummy DistilBERT model."""
+    return EnsemblePredictor([DistilBertPredictor(dummy_model)])
+
+
 @pytest.fixture()
-def client(dummy_model):
+def client(dummy_ensemble):
     with TestClient(app) as c:
-        app.state.model = dummy_model
+        app.state.ensemble = dummy_ensemble
         yield c
 
 
 @pytest.fixture()
 def client_no_model():
     with TestClient(app) as c:
-        app.state.model = None
+        app.state.ensemble = None
         yield c
 
 

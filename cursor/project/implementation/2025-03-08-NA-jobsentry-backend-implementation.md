@@ -79,10 +79,6 @@ All 10 phases from the plan were completed in a single pass:
 - No hardcoded absolute paths in app code
 - Dependencies install cleanly
 
-### Manual (pending)
-- Start app with real model: `uvicorn app.main:app --reload`
-- Open `/docs`, call `POST /predict` with a sample job post
-- Verify prediction and confidence are sensible
-- Call `POST /batch-predict` with 5–10 posts
-- Call `GET /health` and confirm `model_loaded: true`
-- Measure p95 latency per prediction with real model
+### Manual (see verification doc)
+- Thesis-model manual verification and results: **`cursor/project/implementation/2025-03-08-thesis-model-manual-verification.md`**
+- Steps: start app with real model, `/health`, `/predict`, `/batch-predict`, p95 latency (target < 2 s)

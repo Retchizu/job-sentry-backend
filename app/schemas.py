@@ -41,3 +41,5 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_name: Optional[str] = None
+    hybrid_enabled: Optional[bool] = None
+    models_loaded: Optional[List[str]] = None
