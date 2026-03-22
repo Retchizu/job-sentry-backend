@@ -1,45 +1,80 @@
-from typing import List, Optional
+"""Pydantic models for the HTTP API."""
 
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class RateInput(BaseModel):
+    """Structured compensation rate (optional on `JobPostInput`); not used by `combined_text()` yet."""
+
+    amount_min: float = Field(..., ge=0)
+    amount_max: float = Field(..., ge=0)
+    currency: str = Field(
+        ...,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Z]{3}$",
+        description="ISO 4217 alphabetic currency code in uppercase (e.g. PHP, USD).",
+    )
+    type: Literal["hourly", "daily", "weekly", "monthly", "yearly"]
+
+    @model_validator(mode="after")
+    def min_le_max(self) -> RateInput:
+        if self.amount_min > self.amount_max:
+            raise ValueError("amount_min must be <= amount_max")
+        return self
 
 
 class JobPostInput(BaseModel):
-    job_title: str = Field(..., min_length=1, max_length=500)
-    job_desc: str = Field(..., min_length=1, max_length=50_000)
-    company_profile: Optional[str] = Field(None, max_length=10_000)
-    skills_desc: Optional[str] = Field(None, max_length=10_000)
-    salary_range: Optional[str] = Field(None, max_length=200)
-    employment_type: Optional[str] = Field(None, max_length=100)
+    """One job posting; either `text` or structured fields (merged like `combined_text` in training)."""
+
+    text: Optional[str] = None
+    job_title: Optional[str] = None
+    job_desc: Optional[str] = None
+    skills_desc: Optional[str] = None
+    company_profile: Optional[str] = None
+    rate: Optional[RateInput] = None
+
+    def combined_text(self) -> str:
+        if self.text is not None and str(self.text).strip():
+            return str(self.text).strip()
+        parts = [
+            self.job_title or "",
+            self.job_desc or "",
+            self.skills_desc or "",
+            self.company_profile or "",
+        ]
+        joined = " ".join(p.strip() for p in parts if p and str(p).strip())
+        if not joined:
+            raise ValueError(
+                "Empty input: provide non-empty `text` or at least one structured field."
+            )
+        return joined
+
+
+class PredictRequest(BaseModel):
+    posts: list[JobPostInput] = Field(..., min_length=1)
 
 
 class PredictResponse(BaseModel):
-    prediction: str = Field(..., description="'scam' or 'legitimate'")
-    confidence: float = Field(
-        ..., ge=0.0, le=1.0, description="Confidence in the predicted class"
-    )
-    scam_probability: float = Field(
-        ..., ge=0.0, le=1.0, description="Raw probability of being a scam"
-    )
-    warning_signals: List[str] = Field(
-        default_factory=list,
-        description="List of detected warning signals",
-    )
-
-
-class BatchPredictRequest(BaseModel):
-    job_posts: List[JobPostInput] = Field(
-        ..., min_length=1, max_length=50, description="List of job posts to analyze"
-    )
-
-
-class BatchPredictResponse(BaseModel):
-    results: List[PredictResponse]
-    count: int
+    scam_probabilities: list[float]
+    predicted_scam: list[bool]
+    threshold: float
 
 
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
-    model_name: Optional[str] = None
-    hybrid_enabled: Optional[bool] = None
-    models_loaded: Optional[List[str]] = None
+    mode: str
+    artifact_path: Optional[str] = None
+    device: str
+    message: Optional[str] = None
+
+
+class RootResponse(BaseModel):
+    service: str
+    version: str
+    docs: str

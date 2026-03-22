@@ -1,104 +1,138 @@
+"""FastAPI entrypoint: phase6 fused scam detection."""
+
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 
-from app.bilstm import load_bilstm
-from app.config import settings
-from app.ensemble import DistilBertPredictor, EnsemblePredictor
-from app.model import load_model
-from app.schemas import (
-    BatchPredictRequest,
-    BatchPredictResponse,
-    HealthResponse,
-    JobPostInput,
-    PredictResponse,
-)
-from app.services.prediction import predict_batch, predict_single
-from app.traditional_ml import load_phase6_merged
+from app.config import Settings, get_settings
+from app.fused_predictor import FusedScamPredictor, resolve_device
+from app.schemas import HealthResponse, PredictRequest, PredictResponse, RootResponse
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+SERVICE_NAME = "job-sentry-backend"
+SERVICE_VERSION = "0.2.0"
+
+
+def _load_predictor(settings: Settings) -> Optional[FusedScamPredictor]:
+    if not settings.phase6_fused_dir:
+        logger.info(
+            "JOBSENTRY_PHASE6_FUSED_DIR is not set — no fused model loaded. "
+            "Set it to your artifacts directory (e.g. artifacts/models/phase6_fused)."
+        )
+        return None
+    device = resolve_device(settings.device)
+    return FusedScamPredictor.from_artifact_dir(
+        settings.phase6_fused_dir,
+        checkpoint_override=settings.phase6_fused_checkpoint,
+        device=device,
+        max_batch_size=settings.max_batch_size,
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Loading model on startup...")
+    settings = get_settings()
     try:
-        distilbert_model = load_model()
-        logger.info("Model loaded successfully")
-    except Exception:
-        logger.exception("Failed to load model")
-        distilbert_model = None
-
-    phase6_model = None
-    if settings.phase6_merged_path:
-        phase6_model = load_phase6_merged(settings.phase6_merged_path)
-
-    bilstm_model = None
-    if settings.bilstm_artifact_path:
-        bilstm_model = load_bilstm(settings.bilstm_artifact_path)
-
-    if distilbert_model is not None:
-        predictors = [DistilBertPredictor(distilbert_model)]
-        if phase6_model is not None:
-            predictors.append(phase6_model)
-        if bilstm_model is not None:
-            predictors.append(bilstm_model)
-        app.state.ensemble = EnsemblePredictor(predictors)
-        logger.info(
-            "Ensemble ready: %s (hybrid=%s)",
-            app.state.ensemble.predictor_names,
-            app.state.ensemble.is_hybrid,
-        )
-    else:
-        app.state.ensemble = None
-
+        app.state.predictor = _load_predictor(settings)
+    except Exception as e:
+        logger.exception("Fused model failed to load (JOBSENTRY_PHASE6_FUSED_DIR is set).")
+        raise RuntimeError(
+            "Failed to load phase6 fused model. Fix artifacts or unset JOBSENTRY_PHASE6_FUSED_DIR."
+        ) from e
     yield
 
 
-app = FastAPI(
-    title="Job Sentry API",
-    description="Backend API for Job Sentry — scam job post detection",
-    version="0.2.0",
-    lifespan=lifespan,
-)
-
-
-def _get_ensemble(request: Request) -> EnsemblePredictor:
-    ensemble = request.app.state.ensemble
-    if ensemble is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    return ensemble
-
-
-@app.get("/")
-async def root():
-    return {"message": "Job Sentry API", "docs": "/docs"}
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health(request: Request):
-    ensemble = request.app.state.ensemble
-    if ensemble is None:
-        return HealthResponse(status="degraded", model_loaded=False)
-    return HealthResponse(
-        status="ok",
-        model_loaded=True,
-        model_name=settings.model_name,
-        hybrid_enabled=ensemble.is_hybrid,
-        models_loaded=ensemble.predictor_names,
+def root() -> RootResponse:
+    return RootResponse(
+        service=SERVICE_NAME,
+        version=SERVICE_VERSION,
+        docs="/docs",
     )
 
 
-@app.post("/predict", response_model=PredictResponse)
-async def predict(job_post: JobPostInput, request: Request):
-    ensemble = _get_ensemble(request)
-    return predict_single(job_post, ensemble)
+def health(request: Request) -> HealthResponse:
+    settings = get_settings()
+    predictor: Optional[FusedScamPredictor] = getattr(request.app.state, "predictor", None)
+    device_str = "n/a"
+    if predictor is not None:
+        device_str = str(predictor.device)
+    elif settings.device:
+        device_str = settings.device
+    else:
+        import torch
+
+        device_str = str(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+    if predictor is not None:
+        return HealthResponse(
+            status="ok",
+            model_loaded=True,
+            mode="phase6_fused",
+            artifact_path=str(settings.phase6_fused_dir) if settings.phase6_fused_dir else None,
+            device=device_str,
+            message=None,
+        )
+
+    msg = (
+        "No fused model configured. Set JOBSENTRY_PHASE6_FUSED_DIR to enable predictions."
+    )
+    return HealthResponse(
+        status="degraded",
+        model_loaded=False,
+        mode="none",
+        artifact_path=None,
+        device=device_str,
+        message=msg,
+    )
 
 
-@app.post("/batch-predict", response_model=BatchPredictResponse)
-async def batch_predict(body: BatchPredictRequest, request: Request):
-    ensemble = _get_ensemble(request)
-    results = predict_batch(body.job_posts, ensemble)
-    return BatchPredictResponse(results=results, count=len(results))
+def predict(request: Request, body: PredictRequest) -> PredictResponse:
+    settings = get_settings()
+    predictor: Optional[FusedScamPredictor] = getattr(request.app.state, "predictor", None)
+    if predictor is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Fused model not loaded. Set JOBSENTRY_PHASE6_FUSED_DIR and restart.",
+        )
+
+    texts: list[str] = []
+    for post in body.posts:
+        try:
+            texts.append(post.combined_text())
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+    if len(texts) > settings.max_batch_size:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Batch size {len(texts)} exceeds max_batch_size={settings.max_batch_size}.",
+        )
+
+    probs = predictor.predict_proba(texts)
+    thr = float(predictor.fused_meta.get("threshold", settings.confidence_threshold))
+    labels = [p >= thr for p in probs]
+    return PredictResponse(
+        scam_probabilities=probs,
+        predicted_scam=labels,
+        threshold=thr,
+    )
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title=SERVICE_NAME,
+        version=SERVICE_VERSION,
+        lifespan=lifespan,
+    )
+    app.add_api_route("/", root, methods=["GET"], response_model=RootResponse)
+    app.add_api_route("/health", health, methods=["GET"], response_model=HealthResponse)
+    app.add_api_route("/predict", predict, methods=["POST"], response_model=PredictResponse)
+    return app
+
+
+app = create_app()

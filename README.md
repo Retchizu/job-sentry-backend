@@ -1,6 +1,6 @@
 # Job Sentry Backend
 
-FastAPI backend for Job Sentry.
+FastAPI backend for Job Sentry — **phase6 fused** (DistilBERT + word BiLSTM + fusion head) inference when local artifacts are configured.
 
 ## Setup
 
@@ -10,64 +10,68 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+**Note:** `tensorflow` is listed for optional legacy Keras BiLSTM workflows; it is **not** required for the fused model. If `pip install` fails on your platform for TensorFlow, install the other packages individually or use a Python version TensorFlow supports.
+
+Copy `.env.example` to `.env` and set variables as needed.
+
 ## Run
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-- API: http://127.0.0.1:8000
-- Docs: http://127.0.0.1:8000/docs
+- API: http://127.0.0.1:8000  
+- Docs: http://127.0.0.1:8000/docs  
 
-## Running with the real model
+## Phase 6 fused model (recommended)
 
-The app loads the thesis-trained DistilBERT when a checkpoint directory containing `model.safetensors` is available. Without it, the app falls back to the base (untrained) model and logs a warning; predictions are not meaningful.
+The app loads **`HybridFusedClassifier`** weights and tokenizers from a single artifact directory (for example `artifacts/models/phase6_fused/`). Layout:
 
-**Prerequisites:** The checkpoint directory must contain `model.safetensors` (e.g. from the thesis project: `models/distilbert_run/checkpoint-5412/`).
+- `fused_meta.json` — hyperparameters and default threshold  
+- `word_index.json` — LSTM vocabulary (from training)  
+- `tokenizer.json`, `tokenizer_config.json` — DistilBERT tokenizer  
+- **Weights:** `model.safetensors` **or** `checkpoints/epoch_NN.pt` (if safetensors is missing, the **highest** `NN` is used unless you override)
 
-**Option A — Relative path:** Clone or copy the thesis project so the checkpoint is at `thesis-scam-job-post/models/distilbert_run/checkpoint-5412` relative to the process working directory (e.g. repo root). No env change needed.
-
-**Option B — Override path:** Set `JOBSENTRY_MODEL_ARTIFACT_PATH` to the absolute or relative path of the checkpoint directory that contains `model.safetensors`:
+**Configure:**
 
 ```bash
-export JOBSENTRY_MODEL_ARTIFACT_PATH=/path/to/checkpoint-5412
+export JOBSENTRY_PHASE6_FUSED_DIR=/absolute/or/relative/path/to/phase6_fused
 uvicorn app.main:app --reload
 ```
 
-**Verify:** Start the app with `uvicorn app.main:app --reload`. Check logs for `Loading fine-tuned model from ...` (not "No model.safetensors found"). Call `GET /health` and confirm `model_loaded: true` and `status: "ok"`.
+Optional:
 
-## Deployment and model artifact
+- `JOBSENTRY_PHASE6_FUSED_CHECKPOINT` — path to a specific `epoch_XX.pt`  
+- `JOBSENTRY_DEVICE` — `cpu` or `cuda` (default: CUDA if available, else CPU)  
+- `JOBSENTRY_MAX_BATCH_SIZE` — cap for number of `posts` in one `/predict` call  
 
-**Production:** The app expects the checkpoint directory (containing `model.safetensors`) at the path given by `JOBSENTRY_MODEL_ARTIFACT_PATH`. Options: (1) Mount a volume or bind-mount that directory into the container or filesystem at a known path and set `JOBSENTRY_MODEL_ARTIFACT_PATH` to that path; (2) Copy the checkpoint into the image at a fixed path and set `JOBSENTRY_MODEL_ARTIFACT_PATH` accordingly; (3) Use a shared filesystem or artifact store and set the env var to that path.
+**Failure behavior:** If `JOBSENTRY_PHASE6_FUSED_DIR` is set but artifacts are missing or weights cannot be loaded, the process **exits at startup** with an error. If the variable is **unset**, the app starts in a **degraded** mode: `GET /health` reports `model_loaded: false` and `POST /predict` returns **503**.
 
-**Degraded mode:** If the path is missing or does not contain `model.safetensors`, the app starts with the base (untrained) DistilBERT and logs a warning; `GET /health` still returns `model_loaded: true` but predictions are not meaningful. Ensure the artifact is available in production for real use.
+**Health check:** `GET /health` returns `model_loaded`, `mode` (`phase6_fused` or `none`), `device`, and optional `message` when no model is configured.
 
-**Security:** Do not commit `model.safetensors` to the app repo; obtain it from the thesis project or a secure artifact store.
+**Predict:** `POST /predict` with JSON body `{"posts": [ ... ]}`. Each post may use either:
 
-**Checkpoint:** Default is `thesis-scam-job-post/models/distilbert_run/checkpoint-5412` (final training step). Available checkpoints: 783, 1566, 2349, 3608, 5412. See the thesis-scam-job-post project for training details and metrics.
+- `"text": "..."` — single combined string, or  
+- Structured fields merged like training `combined_text`: `job_title`, `job_desc`, `skills_desc`, `company_profile` (non-empty parts joined with spaces).
 
-## Hybrid model (optional)
+Response: `scam_probabilities`, `predicted_scam` (using threshold from `fused_meta.json` when present), and `threshold`.
 
-By default the app uses only the DistilBERT checkpoint. To enable ensemble predictions, set one or both of these environment variables:
+**Performance:** Each request runs DistilBERT and the LSTM branch; use a GPU in production for throughput. CPU is supported but slower.
 
-| Variable | Description |
-|---|---|
-| `JOBSENTRY_PHASE6_MERGED_PATH` | Path to a joblib pipeline artifact (e.g. TF-IDF + Logistic Regression from the thesis `phase6_merged`). |
-| `JOBSENTRY_BILSTM_ARTIFACT_PATH` | Path to a Keras Bi-LSTM model (`.h5` or `.keras`). A `word_index.json` should be in the same directory. |
-| `JOBSENTRY_HYBRID_COMBINATION` | Combination method (default: `soft_voting`). |
+## Tests
 
-When either path is set and the artifact loads successfully, the app runs all loaded models on each prediction and averages their scam probabilities (soft voting). `GET /health` reports which models are loaded and whether hybrid mode is active.
+```bash
+pytest -q
+```
 
-When neither path is set, behavior is unchanged — DistilBERT only.
+## Legacy DistilBERT-only and hybrid ensemble
 
-Artifact format must match expectations (joblib pipeline for phase6, Keras for Bi-LSTM). See the thesis-scam-job-post project for exact artifact paths and formats.
+Earlier versions of this repository documented DistilBERT-only checkpoints (`JOBSENTRY_MODEL_ARTIFACT_PATH`) and optional TF-IDF / Keras ensembles. The **current** `app` implements **only** the phase6 fused path above. Restoring DistilBERT-only serving in the same process is a separate change; the old env vars are kept in `.env.example` as comments for reference.
 
-## FastAPI setup checklist
+## FastAPI checklist
 
-- [x] `requirements.txt` with `fastapi`, `uvicorn[standard]`
-- [x] App package `app/` with `main.py`
-- [x] FastAPI app instance with title/version
-- [x] Root route `GET /`
-- [x] Health check `GET /health`
-- [ ] Virtual environment created and deps installed (run locally)
-- [ ] Optional: routers, Pydantic models, env config, tests
+- [x] `requirements.txt` with FastAPI stack and torch/transformers for fused inference  
+- [x] `app/` package with `main.py`, fused model loader, and tests  
+- [x] `GET /`, `GET /health`, `POST /predict`  
+- [ ] Virtual environment and deps installed locally  
+- [ ] `JOBSENTRY_PHASE6_FUSED_DIR` pointed at real artifacts in your environment  
