@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.fused_predictor import FusedScamPredictor, resolve_device
+from app.predict_warnings import compute_warnings
 from app.schemas import HealthResponse, PredictRequest, PredictResponse, RootResponse
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,8 @@ def predict(request: Request, body: PredictRequest) -> PredictResponse:
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
 
+    warnings = [compute_warnings(t) for t in texts]
+
     if len(texts) > settings.max_batch_size:
         raise HTTPException(
             status_code=422,
@@ -121,6 +124,7 @@ def predict(request: Request, body: PredictRequest) -> PredictResponse:
         scam_probabilities=probs,
         predicted_scam=labels,
         threshold=thr,
+        warnings=warnings,
     )
 
 

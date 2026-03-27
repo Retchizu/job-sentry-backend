@@ -63,6 +63,11 @@ class PredictResponse(BaseModel):
     scam_probabilities: list[float]
     predicted_scam: list[bool]
     threshold: float
+    warnings: list[list[str]] = Field(
+        ...,
+        description="Heuristic flags per post (e.g. upfront_payment, off_platform_contact). "
+        "Same order as request `posts`.",
+    )
 
 
 class HealthResponse(BaseModel):

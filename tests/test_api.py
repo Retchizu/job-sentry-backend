@@ -67,6 +67,7 @@ def test_predict_with_injected_predictor(monkeypatch: pytest.MonkeyPatch) -> Non
         assert body["scam_probabilities"] == [0.9]
         assert body["predicted_scam"] == [True]
         assert body["threshold"] == 0.5
+        assert body["warnings"] == [[]]
 
 
 def test_predict_with_injected_predictor_and_rate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,6 +105,41 @@ def test_predict_with_injected_predictor_and_rate(monkeypatch: pytest.MonkeyPatc
         assert body["scam_probabilities"] == [0.9]
         assert body["predicted_scam"] == [True]
         assert body["threshold"] == 0.5
+        assert body["warnings"] == [[]]
+
+
+def test_predict_returns_warnings_for_scammy_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOBSENTRY_PHASE6_FUSED_DIR", "")
+    get_settings.cache_clear()
+    app = create_app()
+
+    class _FakePred:
+        fused_meta = {"threshold": 0.5}
+
+        def predict_proba(self, texts: list[str]) -> list[float]:
+            return [0.5] * len(texts)
+
+    with TestClient(app) as client:
+        app.state.predictor = _FakePred()
+        r = client.post(
+            "/predict",
+            json={
+                "posts": [
+                    {
+                        "text": "Urgent! Pay $50 fee via WhatsApp. Guaranteed income today only.",
+                    },
+                ]
+            },
+        )
+        assert r.status_code == 200
+        w = r.json()["warnings"]
+        assert len(w) == 1
+        assert set(w[0]) >= {
+            "upfront_payment",
+            "off_platform_contact",
+            "high_pressure",
+            "guaranteed_income",
+        }
 
 
 def test_predict_422_when_rate_min_exceeds_max(monkeypatch: pytest.MonkeyPatch) -> None:
