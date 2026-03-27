@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.fused_predictor import FusedScamPredictor, resolve_device
@@ -128,6 +129,13 @@ def create_app() -> FastAPI:
         title=SERVICE_NAME,
         version=SERVICE_VERSION,
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.add_api_route("/", root, methods=["GET"], response_model=RootResponse)
     app.add_api_route("/health", health, methods=["GET"], response_model=HealthResponse)
