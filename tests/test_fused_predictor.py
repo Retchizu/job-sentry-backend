@@ -1,4 +1,4 @@
-"""Tests for FusedScamPredictor.predict_proba."""
+"""Tests for FusedScamPredictor.predict_risk_distribution."""
 
 from __future__ import annotations
 
@@ -7,18 +7,14 @@ from unittest.mock import MagicMock
 import torch
 import torch.nn as nn
 
-from app.fused_predictor import FusedScamPredictor, resolve_device
+from app.fused_predictor import FusedScamPredictor, resolve_device, risk_predictions_from_softmax_triples
 
 
-class _FlatLogits(nn.Module):
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        lstm_ids: torch.Tensor,
-    ) -> torch.Tensor:
+class _FlatThreeLogits(nn.Module):
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         b = input_ids.shape[0]
-        return torch.zeros(b, 2, dtype=torch.float32)
+        # logits [0,0,0] -> softmax ≈ (1/3, 1/3, 1/3)
+        return torch.zeros(b, 3, dtype=torch.float32)
 
 
 def _fake_tokenizer(texts, **kwargs):
@@ -29,37 +25,80 @@ def _fake_tokenizer(texts, **kwargs):
     }
 
 
-def test_predict_proba_length_and_range() -> None:
+def test_predict_risk_distribution_length_and_softmax() -> None:
     tok = MagicMock(side_effect=_fake_tokenizer)
-    meta = {"max_len_bert": 16, "max_len_bilstm": 16, "threshold": 0.5}
-    word2idx = {"<PAD>": 0, "<OOV>": 1, "hello": 2}
+    meta = {"max_len_bert": 16, "num_labels": 3}
     p = FusedScamPredictor(
-        _FlatLogits(),
+        _FlatThreeLogits(),
         tok,
-        word2idx,
         meta,
         torch.device("cpu"),
         max_batch_size=10,
     )
-    probs = p.predict_proba(["a", "bb", "ccc"])
-    assert len(probs) == 3
-    for x in probs:
-        assert 0.0 <= x <= 1.0
-        assert abs(x - 0.5) < 1e-5
+    triples = p.predict_risk_distribution(["a", "bb", "ccc"])
+    assert len(triples) == 3
+    for t in triples:
+        assert len(t) == 3
+        assert abs(sum(t) - 1.0) < 1e-5
+        assert abs(t[0] - 1 / 3) < 1e-4
 
 
 def test_resolve_device_explicit_cpu() -> None:
     assert str(resolve_device("cpu")) == "cpu"
 
 
-def test_predict_proba_empty() -> None:
+def test_predict_risk_distribution_empty() -> None:
     tok = MagicMock(side_effect=_fake_tokenizer)
-    meta = {"max_len_bert": 8, "max_len_bilstm": 8}
+    meta = {"max_len_bert": 8, "num_labels": 3}
     p = FusedScamPredictor(
-        _FlatLogits(),
+        _FlatThreeLogits(),
         tok,
-        {"<PAD>": 0},
         meta,
         torch.device("cpu"),
     )
-    assert p.predict_proba([]) == []
+    assert p.predict_risk_distribution([]) == []
+
+
+def test_risk_predictions_from_softmax_triples_known_values() -> None:
+    rows = risk_predictions_from_softmax_triples([(0.1, 0.2, 0.7)])
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.predicted_class == 2
+    assert r.predicted_label == "fraud"
+    assert r.legit_probability == 0.1
+    assert r.warning_probability == 0.2
+    assert r.fraud_probability == 0.7
+    assert r.confidence == 0.7
+
+
+def test_predict_full_matches_triples_and_labels() -> None:
+    tok = MagicMock(side_effect=_fake_tokenizer)
+    meta = {"max_len_bert": 16, "num_labels": 3}
+    p = FusedScamPredictor(
+        _FlatThreeLogits(),
+        tok,
+        meta,
+        torch.device("cpu"),
+        max_batch_size=10,
+    )
+    full = p.predict_full(["x", "yy"])
+    triples = p.predict_risk_distribution(["x", "yy"])
+    assert len(full) == len(triples) == 2
+    for row, t in zip(full, triples, strict=True):
+        assert row.legit_probability == t[0]
+        assert row.warning_probability == t[1]
+        assert row.fraud_probability == t[2]
+        assert row.confidence == max(t)
+    assert full[0].predicted_label == "legit"  # tie at 1/3 → argmax index 0
+
+
+def test_predict_full_empty() -> None:
+    tok = MagicMock(side_effect=_fake_tokenizer)
+    meta = {"max_len_bert": 8, "num_labels": 3}
+    p = FusedScamPredictor(
+        _FlatThreeLogits(),
+        tok,
+        meta,
+        torch.device("cpu"),
+    )
+    assert p.predict_full([]) == []

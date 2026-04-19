@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -17,7 +18,7 @@ from app.schemas import HealthResponse, PredictRequest, PredictResponse, RootRes
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "job-sentry-backend"
-SERVICE_VERSION = "0.2.0"
+SERVICE_VERSION = "0.3.0"
 
 
 def _load_predictor(settings: Settings) -> Optional[FusedScamPredictor]:
@@ -33,6 +34,7 @@ def _load_predictor(settings: Settings) -> Optional[FusedScamPredictor]:
         checkpoint_override=settings.phase6_fused_checkpoint,
         device=device,
         max_batch_size=settings.max_batch_size,
+        p_fraud_threshold=settings.p_fraud_decision_threshold,
     )
 
 
@@ -97,6 +99,7 @@ def predict(request: Request, body: PredictRequest) -> PredictResponse:
     settings = get_settings()
     predictor: Optional[FusedScamPredictor] = getattr(request.app.state, "predictor", None)
     if predictor is None:
+        logger.warning("predict_unavailable reason=no_model_loaded")
         raise HTTPException(
             status_code=503,
             detail="Fused model not loaded. Set JOBSENTRY_PHASE6_FUSED_DIR and restart.",
@@ -107,23 +110,46 @@ def predict(request: Request, body: PredictRequest) -> PredictResponse:
         try:
             texts.append(post.combined_text())
         except ValueError as e:
+            logger.warning("predict_reject reason=empty_input")
             raise HTTPException(status_code=422, detail=str(e)) from e
 
     warnings = [compute_warnings(t) for t in texts]
 
     if len(texts) > settings.max_batch_size:
+        logger.warning(
+            "predict_reject reason=batch_too_large size=%d max=%d",
+            len(texts),
+            settings.max_batch_size,
+        )
         raise HTTPException(
             status_code=422,
             detail=f"Batch size {len(texts)} exceeds max_batch_size={settings.max_batch_size}.",
         )
 
-    probs = predictor.predict_proba(texts)
-    thr = float(predictor.fused_meta.get("threshold", settings.confidence_threshold))
-    labels = [p >= thr for p in probs]
+    t0 = time.perf_counter()
+    rows = predictor.predict_full(texts)
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+
+    predicted_class = [r.predicted_class for r in rows]
+    predicted_label = [r.predicted_label for r in rows]
+    legit_probability = [r.legit_probability for r in rows]
+    warning_probability = [r.warning_probability for r in rows]
+    fraud_probability = [r.fraud_probability for r in rows]
+    confidence = [r.confidence for r in rows]
+
+    logger.info(
+        "predict_ok posts=%d latency_ms=%.2f",
+        len(texts),
+        latency_ms,
+    )
+
     return PredictResponse(
-        scam_probabilities=probs,
-        predicted_scam=labels,
-        threshold=thr,
+        predicted_class=predicted_class,
+        predicted_label=predicted_label,
+        legit_probability=legit_probability,
+        warning_probability=warning_probability,
+        fraud_probability=fraud_probability,
+        confidence=confidence,
         warnings=warnings,
     )
 

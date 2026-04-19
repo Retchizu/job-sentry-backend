@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.fused_loader import resolve_weight_source
+from app.fused_loader import _validate_risk_class_labels, resolve_weight_source
 
 
 def test_resolve_prefers_safetensors(tmp_path: Path) -> None:
@@ -31,7 +31,19 @@ def test_resolve_checkpoint_override(tmp_path: Path) -> None:
     assert path == ckpt
 
 
-def test_resolve_highest_epoch(tmp_path: Path) -> None:
+def test_resolve_prefers_epoch_8_when_present(tmp_path: Path) -> None:
+    d = tmp_path / "art"
+    ck = d / "checkpoints"
+    ck.mkdir(parents=True)
+    (ck / "epoch_03.pt").write_bytes(b"a")
+    (ck / "epoch_08.pt").write_bytes(b"best")
+    (ck / "epoch_12.pt").write_bytes(b"b")
+    kind, path = resolve_weight_source(d, None)
+    assert kind == "checkpoint"
+    assert path.name == "epoch_08.pt"
+
+
+def test_resolve_highest_epoch_when_epoch_8_missing(tmp_path: Path) -> None:
     d = tmp_path / "art"
     ck = d / "checkpoints"
     ck.mkdir(parents=True)
@@ -48,3 +60,31 @@ def test_resolve_missing_weights_raises(tmp_path: Path) -> None:
     d.mkdir()
     with pytest.raises(FileNotFoundError):
         resolve_weight_source(d, None)
+
+
+def test_validate_risk_class_labels_warns_on_length_mismatch(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    _validate_risk_class_labels({"num_labels": 3, "risk_class_labels": ["legit", "warning"]})
+    assert "length" in caplog.text
+
+
+def test_validate_risk_class_labels_warns_on_wrong_order(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    _validate_risk_class_labels(
+        {"num_labels": 3, "risk_class_labels": ["fraud", "warning", "legit"]}
+    )
+    assert "does not match expected order" in caplog.text
+
+
+def test_validate_risk_class_labels_ok_when_aligned(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    _validate_risk_class_labels(
+        {"num_labels": 3, "risk_class_labels": ["legit", "warning", "fraud"]}
+    )
+    assert caplog.text == ""

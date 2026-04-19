@@ -60,9 +60,31 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    scam_probabilities: list[float]
-    predicted_scam: list[bool]
-    threshold: float
+    predicted_class: list[int] = Field(
+        ...,
+        description="Risk class per TICKET-001: 0=legit, 1=warning, 2=fraud.",
+    )
+    predicted_label: list[str] = Field(
+        ...,
+        description='String label per post: "legit", "warning", or "fraud".',
+    )
+    legit_probability: list[float] = Field(
+        ...,
+        description="Per post: P(legit) from the 3-class softmax (sums with warning+fraud to ~1).",
+    )
+    warning_probability: list[float] = Field(
+        ...,
+        description="Per post: P(warning) from the 3-class softmax.",
+    )
+    fraud_probability: list[float] = Field(
+        ...,
+        description="Per post: P(fraud) from the 3-class softmax.",
+    )
+    confidence: list[float] = Field(
+        ...,
+        description="Per post: max(legit_probability, warning_probability, fraud_probability) "
+        "from the 3-class softmax (winner probability).",
+    )
     warnings: list[list[str]] = Field(
         ...,
         description="Heuristic flags per post (e.g. upfront_payment, off_platform_contact). "

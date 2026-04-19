@@ -82,5 +82,3 @@ If the plan has existing checkmarks:
 - Verify previous work only if something seems off
 
 Remember: You're implementing a solution, not just checking boxes. Keep the end goal in mind and maintain forward momentum.
-
-**Write the summary** of implementation `cursor/project/implementation/YYYY-MM-DD-NA-XXXX-description.md` 

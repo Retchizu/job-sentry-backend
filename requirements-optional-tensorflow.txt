@@ -1,0 +1,4 @@
+# Optional: only if you need Keras / TensorFlow Bi-LSTM notebooks or legacy scripts.
+# TensorFlow does not support all Python versions — use a version TensorFlow lists for
+# your OS (often 3.9–3.12). The FastAPI fused model does NOT need this.
+tensorflow>=2.13.0

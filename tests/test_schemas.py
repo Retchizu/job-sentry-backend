@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import JobPostInput, PredictRequest, RateInput
+from app.schemas import JobPostInput, PredictRequest, PredictResponse, RateInput
 
 
 def test_rate_input_valid() -> None:
@@ -99,3 +99,19 @@ def test_rate_rejects_unknown_type_literal() -> None:
                 "type": "per_project",
             }
         )
+
+
+def test_predict_response_roundtrip() -> None:
+    resp = PredictResponse(
+        predicted_class=[0, 1, 2],
+        predicted_label=["legit", "warning", "fraud"],
+        legit_probability=[1.0, 0.0, 0.0],
+        warning_probability=[0.0, 1.0, 0.0],
+        fraud_probability=[0.0, 0.0, 1.0],
+        confidence=[0.9, 0.7, 0.99],
+        warnings=[[], ["upfront_payment"], []],
+    )
+    data = resp.model_dump()
+    again = PredictResponse.model_validate(data)
+    assert again.predicted_class == [0, 1, 2]
+    assert len(again.legit_probability) == 3
